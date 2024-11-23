@@ -4,27 +4,25 @@ import matplotlib.pyplot as plt
 import os
 import argparse
 
-# PCD 파일들 경로 지정
 parser = argparse.ArgumentParser(description="Process PCD files.")
 parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
 args = parser.parse_args()
 
+# PCD 데이터 로드
 folder_path = args.folder_path
 file_names = sorted([f for f in os.listdir(folder_path) if f.endswith('.pcd')])
 file_index = 0
 
 # VisualizerWithKeyCallback 생성 및 창 열기
 visualizer = o3d.visualization.VisualizerWithKeyCallback()
-visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes")
+visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes", width=720, height=720)
 
 # 초기 클러스터 색상 저장 변수
 cluster_colors = None
 
 # 카메라 뷰포인트 저장 변수
 view_control = visualizer.get_view_control()
-initial_view_params = None
 current_view_params = None
-
 
 # 클러스터링 및 필터링을 수행하는 함수
 def process_pcd(file_path):
@@ -102,41 +100,39 @@ def process_pcd(file_path):
 
 
 # Callback Function 정의
-def load_next_pcd(vis):
-    global file_index, file_names, current_view_params
-    
-    current_view_params = view_control.convert_to_pinhole_camera_parameters()
-
-    file_index = (file_index + 1) % len(file_names)
-    file_path = os.path.join(folder_path, file_names[file_index])
-    final_point, bboxes_1234 = process_pcd(file_path)
-
+def update_pcd(vis, index, view_control, viewpoint_params):
     vis.clear_geometries()
+    file_path = os.path.join(folder_path, file_names[index])
+    
+    final_point, bboxes_1234 = process_pcd(file_path)
     vis.add_geometry(final_point)
     for bbox in bboxes_1234:
         vis.add_geometry(bbox)
-
-    if current_view_params is not None:
-        view_control.convert_from_pinhole_camera_parameters(current_view_params)
     
+    vis.get_render_option().point_size = 0.2
+
+    if viewpoint_params is not None:
+        view_control.convert_from_pinhole_camera_parameters(viewpoint_params, allow_arbitrary=True)
+         
+def load_next_pcd(vis):
+    global file_index, current_view_params
+    
+    current_view_params = view_control.convert_to_pinhole_camera_parameters()
+
+    if file_index < len(file_names) - 1:
+        file_index += 1
+        update_pcd(vis, file_index, view_control, current_view_params)
+ 
     return False
 
 def load_previous_pcd(vis):
-    global file_index, file_names, current_view_params
-    
+    global file_index, current_view_params
+
     current_view_params = view_control.convert_to_pinhole_camera_parameters()
 
-    file_index = (file_index - 1 + len(file_names)) % len(file_names)
-    file_path = os.path.join(folder_path, file_names[file_index])
-    final_point, bboxes_1234 = process_pcd(file_path)
-
-    vis.clear_geometries()
-    vis.add_geometry(final_point)
-    for bbox in bboxes_1234:
-        vis.add_geometry(bbox)
-
-    if current_view_params is not None:
-        view_control.convert_from_pinhole_camera_parameters(current_view_params)
+    if file_index > 0:
+        file_index -= 1
+        update_pcd(vis, file_index, view_control, current_view_params)
 
     return False
 
@@ -146,15 +142,8 @@ def quit_visualizer(vis):
 
 
 # 첫 번째 파일 로드
-file_path = os.path.join(folder_path, file_names[file_index])
-final_point, bboxes_1234 = process_pcd(file_path)
-visualizer.add_geometry(final_point)
-for bbox in bboxes_1234:
-    visualizer.add_geometry(bbox)
-
-# 초기 카메라 뷰포인트 저장 & Callback 함수 등록
-initial_view_params = view_control.convert_to_pinhole_camera_parameters()
-current_view_params = initial_view_params
+update_pcd(visualizer, file_index, view_control, current_view_params)
+current_view_params = view_control.convert_to_pinhole_camera_parameters()
 
 visualizer.register_key_callback(ord("N"), load_next_pcd)
 visualizer.register_key_callback(ord("P"), load_previous_pcd)
