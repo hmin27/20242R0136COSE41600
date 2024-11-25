@@ -1,6 +1,7 @@
 import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
+import copy
 import os
 import argparse
 
@@ -33,47 +34,67 @@ def process_pcd(file_path):
     voxel_size = 0.2
     downsample_pcd = original_pcd.voxel_down_sample(voxel_size=voxel_size)
 
-    # RANSAC을 사용하여 평면 추정 및 지면 제거
-    plane_model, inliers = downsample_pcd.segment_plane(distance_threshold=0.1, ransac_n=3, num_iterations=2000)
-    non_ground_pcd = downsample_pcd.select_by_index(inliers, invert=True)
+    # Radius Outlier Removal (ROR) 적용
+    cl, ind = downsample_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
+    ror_pcd = downsample_pcd.select_by_index(ind)
 
-    # Radius Outlier Removal (ROR) 적용하여 노이즈 제거
-    cl, ind = non_ground_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
-    filtered_pcd = non_ground_pcd.select_by_index(ind)
+    # RANSAC을 사용하여 평면 제거
+    plane_model, inliers = ror_pcd.segment_plane(distance_threshold=0.1,
+                                                 ransac_n=3,
+                                                 num_iterations=2000)
+    final_point = ror_pcd.select_by_index(inliers, invert=True)
 
-    # DBSCAN 클러스터링 적용 및 색상 지정
-    labels = np.array(filtered_pcd.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
-    max_label = labels.max()
-    colors = np.tile([0, 0, 1], (len(labels), 1))
-    colors[labels < 0] = 0  # 노이즈는 검정색으로 표시
-    filtered_pcd.colors = o3d.utility.Vector3dVector(colors[:, :3])
+    # DBSCAN 클러스터링 적용
+    labels = np.array(final_point.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
+    colors = np.tile([0, 0, 1], (len(labels), 1))  # 파란색
+    colors[labels < 0] = 0  # 노이즈는 검정색
+    final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
 
-    return filtered_pcd, labels
+    return final_point, labels
 
 # 이동한 객체를 ICP로 클러스터 단위로 검출하는 함수
-def detect_moving_clusters_icp(previous_centroids, current_centroids):
+def detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, current_centroids):
+    # ICP registration
+    icp_threshold = 0.5
+    icp_result = o3d.pipelines.registration.registration_icp(
+        source=current_pcd,
+        target=previous_pcd,
+        max_correspondence_distance=icp_threshold,
+        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
+    )
+    transformation = icp_result.transformation
+
+    # 현재 centroids 변환
+    transformed_centroids = []
+    for i, centroid in current_centroids:
+        transformed_point = np.dot(transformation[:3, :3], centroid) + transformation[:3, 3]
+        transformed_centroids.append((i, transformed_point))
+
     moving_clusters = []
     matched_clusters = set()
-        
-    for i_curr, centroid_curr in current_centroids:
+
+    # Matching
+    for i_curr, transformed_centroid in transformed_centroids:
         min_distance = float('inf')
         matched_cluster = None
         for i_prev, centroid_prev in previous_centroids:
-            distance = np.linalg.norm(centroid_curr - centroid_prev)
+            distance = np.linalg.norm(transformed_centroid - centroid_prev)
             if distance < min_distance:
                 min_distance = distance
                 matched_cluster = i_prev
         if matched_cluster is not None and min_distance > 3.0:  # 이동 거리 임계값
             # 필터링 기준 적용
-            cluster_height = centroid_curr[2]
-            cluster_height_diff = abs(centroid_curr[2] - centroid_prev[2])
+            cluster_height = transformed_centroid[2]
+            cluster_height_diff = abs(transformed_centroid[2] - centroid_prev[2])
 
             # 클러스터 높이 범위와 높이 차이 조건
-            if 1.4 <= cluster_height_diff <= 2.0 and cluster_height > 0.5:
+            if 1.4 <= cluster_height_diff <= 2.0 and cluster_height > 0:
                 matched_clusters.add(matched_cluster)
                 moving_clusters.append(i_curr)
 
     return moving_clusters
+
+
 
 # 각 클러스터의 중심 좌표 계산 함수
 def compute_centroids(pcd, labels):
@@ -84,6 +105,7 @@ def compute_centroids(pcd, labels):
         centroid = np.mean(np.asarray(cluster_points.points), axis=0)
         centroids.append((i, centroid))
     return centroids
+
 
 # Callback Function 정의
 def update_pcd(vis, index, view_control, viewpoint_params):
@@ -96,8 +118,8 @@ def update_pcd(vis, index, view_control, viewpoint_params):
     centroids_curr = compute_centroids(current_pcd, labels)
 
     # 이동한 클러스터 검출
-    if previous_centroids is not None:
-        moving_cluster_ids = detect_moving_clusters_icp(previous_centroids, centroids_curr)
+    if previous_centroids is not None and previous_pcd is not None:
+        moving_cluster_ids = detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, centroids_curr)
         for i in moving_cluster_ids:
             cluster_indices = np.where(labels == i)[0]
             cluster_pcd = current_pcd.select_by_index(cluster_indices)
@@ -111,10 +133,11 @@ def update_pcd(vis, index, view_control, viewpoint_params):
     if viewpoint_params is not None:
         view_control.convert_from_pinhole_camera_parameters(viewpoint_params, allow_arbitrary=True)
 
-    previous_pcd = current_pcd
+    previous_pcd = copy.deepcopy(current_pcd)
     previous_centroids = centroids_curr
 
     del current_pcd
+
 
 def load_next_pcd(vis):
     global file_index, current_view_params
