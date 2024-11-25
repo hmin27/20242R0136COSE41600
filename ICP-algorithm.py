@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import copy
 import os
 import argparse
+from filterpy.kalman import KalmanFilter
+import numpy as np
 
 parser = argparse.ArgumentParser(description="Process PCD files.")
 parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
@@ -25,6 +27,76 @@ current_view_params = None
 # 이전 PCD 저장 변수
 previous_pcd = None
 previous_centroids = None
+previous_tracks = {}
+
+# Kalman Filter 초기화 함수
+def initialize_kalman_filter(centroid):
+    """
+    Initialize a Kalman Filter for a given cluster centroid.
+    """
+    kf = KalmanFilter(dim_x=6, dim_z=3)
+    dt = 1.0  # Time step
+
+    kf.F = np.array([
+        [1, 0, 0, dt, 0, 0],
+        [0, 1, 0, 0, dt, 0],
+        [0, 0, 1, 0, 0, dt],
+        [0, 0, 0, 1, 0, 0],
+        [0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 1]
+    ])
+
+    kf.H = np.array([
+        [1, 0, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0, 0],
+        [0, 0, 1, 0, 0, 0]
+    ])
+
+    # 공분산 행렬
+    kf.R = np.eye(3) * 0.1
+    kf.Q = np.eye(6) * 0.1 
+    kf.P *= 1000.0
+
+    # 초기 상태값
+    kf.x[:3] = centroid.reshape(-1, 1)
+    kf.x[3:] = 0.0 
+
+    return kf
+
+# Kalman Filter 기반 객체 추적 함수
+def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformation):
+
+    updated_tracks = {}
+
+    for track_id, kf in previous_tracks.items():
+        kf.predict()
+        
+    transformed_centroids = []
+    for cluster_id, centroid in current_centroids:
+        transformed_point = np.dot(icp_transformation[:3, :3], centroid) + icp_transformation[:3, 3]
+        transformed_centroids.append((cluster_id, transformed_point))
+        
+    # Update step
+    for cluster_id, centroid in current_centroids:
+        min_distance = float('inf')
+        best_track_id = None
+        for track_id, kf in previous_tracks.items():
+            predicted_position = kf.x[:3].flatten()
+            distance = np.linalg.norm(predicted_position - centroid)
+            if distance < min_distance:
+                min_distance = distance
+                best_track_id = track_id
+
+        if best_track_id is not None and min_distance < 3.0:  # track 업데이트
+            previous_tracks[best_track_id].update(centroid)
+            updated_tracks[best_track_id] = previous_tracks[best_track_id]
+        else:
+            # 새로운 item 등록
+            new_track_id = len(previous_tracks) + len(updated_tracks) + 1
+            updated_tracks[new_track_id] = initialize_kalman_filter(centroid)
+
+    return updated_tracks
+
 
 # 클러스터링 및 필터링을 수행하는 함수
 def process_pcd(file_path):
@@ -45,7 +117,7 @@ def process_pcd(file_path):
     final_point = ror_pcd.select_by_index(inliers, invert=True)
 
     # DBSCAN 클러스터링 적용
-    labels = np.array(final_point.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
+    labels = np.array(final_point.cluster_dbscan(eps=0.5, min_points=10, print_progress=True))
     colors = np.tile([0, 0, 1], (len(labels), 1))  # 파란색
     colors[labels < 0] = 0  # 노이즈는 검정색
     final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
@@ -88,7 +160,7 @@ def detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, cu
             cluster_height_diff = abs(transformed_centroid[2] - centroid_prev[2])
 
             # 클러스터 높이 범위와 높이 차이 조건
-            if 1.4 <= cluster_height_diff <= 2.0 and cluster_height > 0:
+            if 1.0 <= cluster_height_diff <= 2.0 and cluster_height > -1.0:
                 matched_clusters.add(matched_cluster)
                 moving_clusters.append(i_curr)
 
@@ -107,9 +179,9 @@ def compute_centroids(pcd, labels):
     return centroids
 
 
-# Callback Function 정의
+# Callback Function 수정
 def update_pcd(vis, index, view_control, viewpoint_params):
-    global previous_pcd, previous_centroids
+    global previous_pcd, previous_centroids, previous_tracks
 
     vis.clear_geometries()
     file_path = os.path.join(folder_path, file_names[index])
@@ -117,15 +189,29 @@ def update_pcd(vis, index, view_control, viewpoint_params):
 
     centroids_curr = compute_centroids(current_pcd, labels)
 
-    # 이동한 클러스터 검출
-    if previous_centroids is not None and previous_pcd is not None:
-        moving_cluster_ids = detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, centroids_curr)
-        for i in moving_cluster_ids:
-            cluster_indices = np.where(labels == i)[0]
+    # ICP를 통한 이동 클러스터 검출
+    if previous_pcd is not None and previous_centroids is not None:
+        icp_transformation = o3d.pipelines.registration.registration_icp(
+            source=current_pcd,
+            target=previous_pcd,
+            max_correspondence_distance=0.5,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        ).transformation
+
+        # Kalman Filter로 트래킹 업데이트
+        previous_tracks = kalman_filter_tracking(previous_tracks, centroids_curr, icp_transformation)
+        for track_id, kf in previous_tracks.items():
+            position = kf.x[:3].flatten()
+            cluster_indices = np.where(labels == track_id)[0]
             cluster_pcd = current_pcd.select_by_index(cluster_indices)
             bbox = cluster_pcd.get_axis_aligned_bounding_box()
-            bbox.color = (1, 0, 0)
+            bbox.color = (0, 1, 0)
             vis.add_geometry(bbox)
+    else:
+        # 첫 번째 프레임: Kalman Filter 초기화
+        previous_tracks = {}
+        for cluster_id, centroid in centroids_curr:
+            previous_tracks[cluster_id] = initialize_kalman_filter(centroid)
 
     vis.add_geometry(current_pcd)
     vis.get_render_option().point_size = 2.0
@@ -137,6 +223,7 @@ def update_pcd(vis, index, view_control, viewpoint_params):
     previous_centroids = centroids_curr
 
     del current_pcd
+
 
 
 def load_next_pcd(vis):
