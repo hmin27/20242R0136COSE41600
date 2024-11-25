@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import argparse
+import time
 
 parser = argparse.ArgumentParser(description="Process PCD files.")
 parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
@@ -16,7 +17,6 @@ file_index = 0
 # VisualizerWithKeyCallback 생성 및 창 열기
 visualizer = o3d.visualization.VisualizerWithKeyCallback()
 visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes", width=720, height=720)
-
 
 # 카메라 뷰포인트 저장 변수
 view_control = visualizer.get_view_control()
@@ -107,40 +107,23 @@ def update_pcd(vis, index, view_control, viewpoint_params):
     if viewpoint_params is not None:
         view_control.convert_from_pinhole_camera_parameters(viewpoint_params, allow_arbitrary=True)
          
-def load_next_pcd(vis):
+
+# 자동 파일 전환
+def auto_advance_pcd():
     global file_index, current_view_params
-    
-    current_view_params = view_control.convert_to_pinhole_camera_parameters()
-
-    if file_index < len(file_names) - 1:
-        file_index += 1
-        update_pcd(vis, file_index, view_control, current_view_params)
- 
-    return False
-
-def load_previous_pcd(vis):
-    global file_index, current_view_params
-
-    current_view_params = view_control.convert_to_pinhole_camera_parameters()
-
-    if file_index > 0:
-        file_index -= 1
-        update_pcd(vis, file_index, view_control, current_view_params)
-
-    return False
-
-def quit_visualizer(vis):
-    vis.destroy_window()
-    return False
-
+    while visualizer.poll_events():
+        current_view_params = view_control.convert_to_pinhole_camera_parameters()
+        if file_index < len(file_names) - 1:
+            file_index += 1
+        else:
+            file_index = 0
+        update_pcd(visualizer, file_index, view_control, current_view_params)
+        visualizer.update_renderer()
+        time.sleep(0.7)
 
 # 첫 번째 파일 로드
 update_pcd(visualizer, file_index, view_control, current_view_params)
 current_view_params = view_control.convert_to_pinhole_camera_parameters()
 
-visualizer.register_key_callback(ord("N"), load_next_pcd)
-visualizer.register_key_callback(ord("P"), load_previous_pcd)
-visualizer.register_key_callback(ord("Q"), quit_visualizer)
-
-visualizer.run()
+auto_advance_pcd()
 visualizer.destroy_window()
