@@ -6,6 +6,7 @@ import os
 import argparse
 from filterpy.kalman import KalmanFilter
 import numpy as np
+import time
 
 parser = argparse.ArgumentParser(description="Process PCD files.")
 parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
@@ -87,7 +88,7 @@ def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformatio
                 min_distance = distance
                 best_track_id = track_id
 
-        if best_track_id is not None and min_distance < 3.0:  # track 업데이트
+        if best_track_id is not None and min_distance < 2.0:  # track 업데이트
             previous_tracks[best_track_id].update(centroid)
             updated_tracks[best_track_id] = previous_tracks[best_track_id]
         else:
@@ -117,7 +118,7 @@ def process_pcd(file_path):
     final_point = ror_pcd.select_by_index(inliers, invert=True)
 
     # DBSCAN 클러스터링 적용
-    labels = np.array(final_point.cluster_dbscan(eps=0.5, min_points=10, print_progress=True))
+    labels = np.array(final_point.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
     colors = np.tile([0, 0, 1], (len(labels), 1))  # 파란색
     colors[labels < 0] = 0  # 노이즈는 검정색
     final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
@@ -154,19 +155,11 @@ def detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, cu
             if distance < min_distance:
                 min_distance = distance
                 matched_cluster = i_prev
-        if matched_cluster is not None and min_distance > 3.0:  # 이동 거리 임계값
-            # 필터링 기준 적용
-            cluster_height = transformed_centroid[2]
-            cluster_height_diff = abs(transformed_centroid[2] - centroid_prev[2])
-
-            # 클러스터 높이 범위와 높이 차이 조건
-            if 1.0 <= cluster_height_diff <= 2.0 and cluster_height > -1.0:
-                matched_clusters.add(matched_cluster)
-                moving_clusters.append(i_curr)
+        if matched_cluster is not None and min_distance > 2.0:  # 이동 거리 임계값
+            matched_clusters.add(matched_cluster)
+            moving_clusters.append(i_curr)
 
     return moving_clusters
-
-
 
 # 각 클러스터의 중심 좌표 계산 함수
 def compute_centroids(pcd, labels):
@@ -178,6 +171,15 @@ def compute_centroids(pcd, labels):
         centroids.append((i, centroid))
     return centroids
 
+# 사람에 대한 필터링 조건 명시
+def is_valid_person(cluster_pcd):
+    bbox = cluster_pcd.get_axis_aligned_bounding_box()
+    bbox_extent = bbox.get_extent()  # (x, y, z)
+    height, width, depth = bbox_extent[2], bbox_extent[0], bbox_extent[1]
+
+    if 1.5 <= height <= 2.0 and 0.2 <= width <= 1.0 and 0.2 <= depth <= 1.0:
+        return True
+    return False
 
 # Callback Function 수정
 def update_pcd(vis, index, view_control, viewpoint_params):
@@ -189,8 +191,10 @@ def update_pcd(vis, index, view_control, viewpoint_params):
 
     centroids_curr = compute_centroids(current_pcd, labels)
 
-    # ICP를 통한 이동 클러스터 검출
     if previous_pcd is not None and previous_centroids is not None:
+        # ICP를 통해 이동 클러스터 검출
+        moving_clusters = detect_moving_clusters_icp(previous_pcd, current_pcd, previous_centroids, centroids_curr)
+
         icp_transformation = o3d.pipelines.registration.registration_icp(
             source=current_pcd,
             target=previous_pcd,
@@ -200,13 +204,26 @@ def update_pcd(vis, index, view_control, viewpoint_params):
 
         # Kalman Filter로 트래킹 업데이트
         previous_tracks = kalman_filter_tracking(previous_tracks, centroids_curr, icp_transformation)
+
+        # 이동 클러스터에 대해 바운딩 박스 생성
+        for cluster_id in moving_clusters:
+            cluster_indices = np.where(labels == cluster_id)[0]
+            if len(cluster_indices) > 0:  # 포인트가 존재하는 경우
+                cluster_pcd = current_pcd.select_by_index(cluster_indices)
+                if is_valid_person(cluster_pcd):  # 유효한 사람인지 확인
+                    bbox = cluster_pcd.get_axis_aligned_bounding_box()
+                    bbox.color = (1, 0, 0)  # 이동 클러스터는 빨간색
+                    vis.add_geometry(bbox)
+
+        # Kalman Filter 추적된 객체에 대해 바운딩 박스 생성
         for track_id, kf in previous_tracks.items():
             position = kf.x[:3].flatten()
             cluster_indices = np.where(labels == track_id)[0]
-            cluster_pcd = current_pcd.select_by_index(cluster_indices)
-            bbox = cluster_pcd.get_axis_aligned_bounding_box()
-            bbox.color = (0, 1, 0)
-            vis.add_geometry(bbox)
+            if len(cluster_indices) > 0:  # 포인트가 존재하는 경우
+                cluster_pcd = current_pcd.select_by_index(cluster_indices)
+                bbox = cluster_pcd.get_axis_aligned_bounding_box()
+                bbox.color = (0, 1, 0)  # 추적된 객체는 초록색
+                vis.add_geometry(bbox)
     else:
         # 첫 번째 프레임: Kalman Filter 초기화
         previous_tracks = {}
@@ -252,13 +269,26 @@ def quit_visualizer(vis):
     vis.close()
     return False
 
-# 첫 번째 파일 로드
-update_pcd(visualizer, file_index, view_control, current_view_params)
-current_view_params = view_control.convert_to_pinhole_camera_parameters()
-
+def auto_advance_pcd():
+    global file_index, current_view_params
+    while visualizer.poll_events():
+        current_view_params = view_control.convert_to_pinhole_camera_parameters()
+        if file_index < len(file_names) - 1:
+            file_index += 1
+        else:
+            file_index = 0
+        update_pcd(visualizer, file_index, view_control, current_view_params)
+        visualizer.update_renderer()
+        time.sleep(0.7)
+        
 visualizer.register_key_callback(ord("N"), load_next_pcd)
 visualizer.register_key_callback(ord("P"), load_previous_pcd)
 visualizer.register_key_callback(ord("Q"), quit_visualizer)
 
+# 첫 번째 파일 로드
+update_pcd(visualizer, file_index, view_control, current_view_params)
+current_view_params = view_control.convert_to_pinhole_camera_parameters()
+
+# auto_advance_pcd()
 visualizer.run()
 visualizer.destroy_window()
