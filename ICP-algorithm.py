@@ -1,5 +1,6 @@
 import open3d as o3d
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 import argparse
 
@@ -40,12 +41,20 @@ def process_pcd(file_path):
     cl, ind = non_ground_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
     filtered_pcd = non_ground_pcd.select_by_index(ind)
 
-    return filtered_pcd
+    # DBSCAN 클러스터링 적용 및 색상 지정
+    labels = np.array(filtered_pcd.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
+    max_label = labels.max()
+    colors = np.tile([0, 0, 1], (len(labels), 1))
+    colors[labels < 0] = 0  # 노이즈는 검정색으로 표시
+    filtered_pcd.colors = o3d.utility.Vector3dVector(colors[:, :3])
+
+    return filtered_pcd, labels
 
 # 이동한 객체를 ICP로 클러스터 단위로 검출하는 함수
 def detect_moving_clusters_icp(previous_centroids, current_centroids):
     moving_clusters = []
     matched_clusters = set()
+        
     for i_curr, centroid_curr in current_centroids:
         min_distance = float('inf')
         matched_cluster = None
@@ -54,9 +63,15 @@ def detect_moving_clusters_icp(previous_centroids, current_centroids):
             if distance < min_distance:
                 min_distance = distance
                 matched_cluster = i_prev
-        if matched_cluster is not None and min_distance > 5.0:  # 이동 거리 임계값
-            matched_clusters.add(matched_cluster)
-            moving_clusters.append(i_curr)
+        if matched_cluster is not None and min_distance > 3.0:  # 이동 거리 임계값
+            # 필터링 기준 적용
+            cluster_height = centroid_curr[2]
+            cluster_height_diff = abs(centroid_curr[2] - centroid_prev[2])
+
+            # 클러스터 높이 범위와 높이 차이 조건
+            if 1.4 <= cluster_height_diff <= 2.0 and cluster_height > 0.5:
+                matched_clusters.add(matched_cluster)
+                moving_clusters.append(i_curr)
 
     return moving_clusters
 
@@ -76,31 +91,21 @@ def update_pcd(vis, index, view_control, viewpoint_params):
 
     vis.clear_geometries()
     file_path = os.path.join(folder_path, file_names[index])
-    current_pcd = process_pcd(file_path)
+    current_pcd, labels = process_pcd(file_path)
 
-    # 현재 PCD의 클러스터들을 검정색으로 표시
-    labels = np.array(current_pcd.cluster_dbscan(eps=0.6, min_points=10, print_progress=True))
-    max_label = labels.max()
     centroids_curr = compute_centroids(current_pcd, labels)
 
     # 이동한 클러스터 검출
     if previous_centroids is not None:
         moving_cluster_ids = detect_moving_clusters_icp(previous_centroids, centroids_curr)
-        for i in range(max_label + 1):
+        for i in moving_cluster_ids:
             cluster_indices = np.where(labels == i)[0]
             cluster_pcd = current_pcd.select_by_index(cluster_indices)
-            if i in moving_cluster_ids:
-                cluster_pcd.paint_uniform_color([1, 0, 0])  # 이동한 클러스터는 빨간색으로 표시
-            else:
-                cluster_pcd.paint_uniform_color([0, 0, 0])  # 이동하지 않은 클러스터는 검정색으로 표시
-            vis.add_geometry(cluster_pcd)
-    else:
-        for i in range(max_label + 1):
-            cluster_indices = np.where(labels == i)[0]
-            cluster_pcd = current_pcd.select_by_index(cluster_indices)
-            cluster_pcd.paint_uniform_color([0, 0, 0])
-            vis.add_geometry(cluster_pcd)
+            bbox = cluster_pcd.get_axis_aligned_bounding_box()
+            bbox.color = (1, 0, 0)
+            vis.add_geometry(bbox)
 
+    vis.add_geometry(current_pcd)
     vis.get_render_option().point_size = 2.0
 
     if viewpoint_params is not None:
@@ -133,7 +138,6 @@ def load_previous_pcd(vis):
 
     return False
 
-# 프로그램 종료 콜백 함수
 def quit_visualizer(vis):
     vis.close()
     return False

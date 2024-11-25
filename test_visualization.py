@@ -17,8 +17,6 @@ file_index = 0
 visualizer = o3d.visualization.VisualizerWithKeyCallback()
 visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes", width=720, height=720)
 
-# 초기 클러스터 색상 저장 변수
-cluster_colors = None
 
 # 카메라 뷰포인트 저장 변수
 view_control = visualizer.get_view_control()
@@ -37,12 +35,10 @@ def process_pcd(file_path):
     cl, ind = downsample_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
     ror_pcd = downsample_pcd.select_by_index(ind)
 
-    # RANSAC을 사용하여 평면 추정
+    # RANSAC을 사용하여 평면 제거
     plane_model, inliers = ror_pcd.segment_plane(distance_threshold=0.1,
                                                  ransac_n=3,
                                                  num_iterations=2000)
-
-    # 도로에 속하지 않는 포인트 (outliers) 추출
     final_point = ror_pcd.select_by_index(inliers, invert=True)
 
     # 포인트 클라우드를 NumPy 배열로 변환
@@ -52,14 +48,11 @@ def process_pcd(file_path):
     with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
         labels = np.array(final_point.cluster_dbscan(eps=0.3, min_points=10, print_progress=True))
 
-    # 각 클러스터를 색으로 표시
     max_label = labels.max()
     print(f"{file_path} point cloud has {max_label + 1} clusters")
 
-    # 클러스터 색상 고정
-    if cluster_colors is None:
-        cluster_colors = plt.get_cmap("tab20")(np.arange(max_label + 1) / (max_label + 1 if max_label > 0 else 1))
-    colors = cluster_colors[labels % len(cluster_colors)]
+    # 노이즈를 제거하고 각 클러스터에 색상 지정
+    colors = plt.get_cmap("tab20")(labels / (max_label + 1 if max_label > 0 else 1))
     colors[labels < 0] = 0  # 노이즈는 검정색으로 표시
     final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
 
@@ -109,7 +102,7 @@ def update_pcd(vis, index, view_control, viewpoint_params):
     for bbox in bboxes_1234:
         vis.add_geometry(bbox)
     
-    vis.get_render_option().point_size = 0.2
+    vis.get_render_option().point_size = 2.0
 
     if viewpoint_params is not None:
         view_control.convert_from_pinhole_camera_parameters(viewpoint_params, allow_arbitrary=True)
