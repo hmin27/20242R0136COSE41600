@@ -37,7 +37,6 @@ def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformatio
     for track_id, kf in previous_tracks.items():
         kf.predict()
 
-    # Transform centroids using the ICP transformation
     transformed_centroids = []
     for cluster_id, centroid in current_centroids:
         transformed_point = np.dot(icp_transformation[:3, :3], centroid) + icp_transformation[:3, 3]
@@ -68,7 +67,7 @@ def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformatio
             updated_tracks[track_id] = previous_tracks[track_id]
             assigned_tracks.add(track_id)
 
-    # Handle unassigned tracks
+    # Unassigned tracks
     for track_id in track_ids:
         if track_id not in assigned_tracks:
             if not hasattr(previous_tracks[track_id], 'frames_unassigned'):
@@ -79,7 +78,7 @@ def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformatio
             if previous_tracks[track_id].frames_unassigned <= 5:
                 updated_tracks[track_id] = previous_tracks[track_id]
 
-    # Create new tracks for unassigned centroids
+    # Create new tracks
     for r in range(len(current_centroids)):
         if r not in row_ind:
             cluster_id, centroid = current_centroids[r]
@@ -88,23 +87,34 @@ def kalman_filter_tracking(previous_tracks, current_centroids, icp_transformatio
             new_track.frames_unassigned = 0
             updated_tracks[new_track_id] = new_track
 
-    # Velocity  moving average
     moving_tracks = {}
-    velocity_threshold = 0.001
+    velocity_threshold = 0.0
+    displacement_threshold = 2.0
     for track_id, kf in updated_tracks.items():
         velocity = np.linalg.norm(kf.x[3:].flatten())
 
         if hasattr(kf, 'velocity_history'):
             kf.velocity_history.append(velocity)
-            if len(kf.velocity_history) > 3:
+            if len(kf.velocity_history) > 5:
                 kf.velocity_history.pop(0)
             avg_velocity = np.mean(kf.velocity_history)
         else:
             kf.velocity_history = [velocity]
             avg_velocity = velocity
 
-        # Only keep tracks with significant movement
-        if avg_velocity > velocity_threshold:
+        if not hasattr(kf, 'position_history'):
+            kf.position_history = []
+
+        kf.position_history.append(kf.x[:3].flatten())
+        if len(kf.position_history) > 3:
+            kf.position_history.pop(0)
+
+        if len(kf.position_history) == 3:
+            displacement = np.linalg.norm(kf.position_history[2] - kf.position_history[0])
+        else:
+            displacement = 0
+
+        if avg_velocity > velocity_threshold or displacement > displacement_threshold:
             moving_tracks[track_id] = kf
 
     return moving_tracks

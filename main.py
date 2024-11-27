@@ -20,9 +20,10 @@ class PCDVisualizer:
         
         # Initialize visualizer
         self.visualizer = o3d.visualization.VisualizerWithKeyCallback()
-        self.visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes", width=720, height=720)
+        self.visualizer.create_window(window_name="Filtered Clusters and Bounding Boxes", width=1024, height=720)
         self.view_control = self.visualizer.get_view_control()
 
+    # Preprocessing PCD
     def process_pcd(self, file_path):
         original_pcd = o3d.io.read_point_cloud(file_path)
         voxel_size = 0.2
@@ -38,7 +39,8 @@ class PCDVisualizer:
         final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
 
         return final_point, labels
-
+    
+    # Center of cluster
     def compute_centroids(self, pcd, labels):
         centroids = []
         for i in range(labels.max() + 1):
@@ -48,6 +50,7 @@ class PCDVisualizer:
             centroids.append((i, centroid))
         return centroids
 
+    # Update point cloud
     def update_pcd(self, vis, index):
         vis.clear_geometries()
         file_path = os.path.join(self.folder_path, self.file_names[index])
@@ -64,15 +67,6 @@ class PCDVisualizer:
             ).transformation
 
             self.previous_tracks = kalman_filter_tracking(self.previous_tracks, centroids_curr, icp_transformation)
-
-            for cluster_id in moving_clusters:
-                cluster_indices = np.where(labels == cluster_id)[0]
-                if len(cluster_indices) > 0:
-                    cluster_pcd = current_pcd.select_by_index(cluster_indices)
-                    if self.is_valid_person(cluster_pcd):
-                        bbox = cluster_pcd.get_axis_aligned_bounding_box()
-                        bbox.color = (1, 0, 0)
-                        vis.add_geometry(bbox)
 
             for track_id, kf in self.previous_tracks.items():
                 position = kf.x[:3].flatten()
@@ -97,6 +91,7 @@ class PCDVisualizer:
         self.previous_pcd = copy.deepcopy(current_pcd)
         self.previous_centroids = centroids_curr
 
+    # ICP algorithm for detecting moving objects
     def detect_moving_clusters_icp(self, previous_pcd, current_pcd, previous_centroids, current_centroids):
         icp_threshold = 0.5
         icp_result = o3d.pipelines.registration.registration_icp(
@@ -129,11 +124,12 @@ class PCDVisualizer:
 
         return moving_clusters
 
+    # Rule-based conditions for human
     def is_valid_person(self, cluster_pcd):
         points = np.asarray(cluster_pcd.points)
         num_points = len(points)
 
-        if not (5 <= num_points <= 30):
+        if not (10 <= num_points <= 30):
             return False
 
         z_values = points[:, 2]
@@ -141,17 +137,26 @@ class PCDVisualizer:
         z_max = z_values.max()
         height_diff = z_max - z_min
 
-        if not (0.5 <= height_diff <= 1.0):
+        if not (0.5 <= height_diff <= 2.0):
             return False
 
-        # # Check the distance from the origin
-        # distances = np.linalg.norm(points, axis=1)
-        # if distances.max() > 30.0:
-        #     return False
+        bbox = cluster_pcd.get_axis_aligned_bounding_box()
+        bbox_extent = bbox.get_extent()
+        x_extent, y_extent, z_extent = bbox_extent[0], bbox_extent[1], bbox_extent[2]
+        if not (0.2 <= x_extent <= 1.0 and 0.2 <= y_extent <= 1.0):
+            return False
+
+        volume = x_extent * y_extent * z_extent
+        if volume > 0:
+            point_density = num_points / volume
+            if point_density < 50:
+                return False
 
         return True
 
+
     def run(self):
+        # Callback functions
         self.visualizer.register_key_callback(ord("N"), self.load_next_pcd)
         self.visualizer.register_key_callback(ord("P"), self.load_previous_pcd)
         self.visualizer.register_key_callback(ord("Q"), self.quit_visualizer)
@@ -179,13 +184,14 @@ class PCDVisualizer:
     def save_image(self, folder_path):
 
         folder_name = os.path.basename(os.path.dirname(folder_path))
-        output_image_path = f"image/{folder_name}"
+        output_image_path = f"image/{folder_name}/{folder_name}"
+        os.makedirs(os.path.dirname(output_image_path), exist_ok=True)
 
         self.visualizer.update_renderer()
 
         start_time = time.time()
 
-        # 각 PCD 파일 시각화 및 비디오 저장
+        # PCD visualization & Save images
         while self.file_index < len(self.file_names):
             current_view_params = self.view_control.convert_to_pinhole_camera_parameters()
 
@@ -213,5 +219,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     render = PCDVisualizer(args.folder_path)
-    # render.save_image(args.folder_path)
-    render.run()
+    render.save_image(args.folder_path)
+    # render.run()
