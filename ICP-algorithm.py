@@ -6,7 +6,10 @@ import os
 import argparse
 from filterpy.kalman import KalmanFilter
 import numpy as np
+import cv2
 import time
+
+from save_as_video import create_video_from_pcd
 
 parser = argparse.ArgumentParser(description="Process PCD files.")
 parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
@@ -241,8 +244,6 @@ def update_pcd(vis, index, view_control, viewpoint_params):
 
     del current_pcd
 
-
-
 def load_next_pcd(vis):
     global file_index, current_view_params
 
@@ -281,14 +282,64 @@ def auto_advance_pcd():
         visualizer.update_renderer()
         time.sleep(0.7)
         
-visualizer.register_key_callback(ord("N"), load_next_pcd)
-visualizer.register_key_callback(ord("P"), load_previous_pcd)
-visualizer.register_key_callback(ord("Q"), quit_visualizer)
+def create_video_from_pcd(folder_path, frame_rate=10):
+    global file_names, view_control, current_view_params, file_index, visualizer
+
+    # 경로 설정
+    folder_name = os.path.basename(os.path.dirname(folder_path))
+    output_video_path = f"result/{folder_name}.mp4"
+    output_image_path = f"image/{folder_name}"
+
+    output_dir = os.path.dirname(output_video_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    update_pcd(visualizer, 0, view_control, current_view_params)
+    visualizer.update_renderer()
+
+    video_writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), frame_rate, (720, 720))
+
+    start_time = time.time()
+
+    # 각 PCD 파일 시각화 및 비디오 저장
+    while file_index < len(file_names) - 280:
+        current_view_params = view_control.convert_to_pinhole_camera_parameters()
+
+        update_pcd(visualizer, file_index, view_control, current_view_params)
+        visualizer.poll_events()
+        visualizer.update_renderer()
+
+        # Open3D 시각화 창 캡처
+        img = np.asarray(visualizer.capture_screen_float_buffer(do_render=True))
+        img = (img * 255).astype(np.uint8)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        image_filename = f"{output_image_path}_{file_index + 1:04d}.png"
+        cv2.imwrite(image_filename, img)
+        
+        video_writer.write(img)
+
+        elapsed_time = time.time() - start_time
+        print(f"Processed {file_index + 1}/{len(file_names)} files. Elapsed time: {elapsed_time:.2f} seconds")
+
+        file_index += 1
+
+    visualizer.destroy_window()
+
+    video_writer.release()
+    print(f"Video saved to {output_video_path}")
+
+
+
+# visualizer.register_key_callback(ord("N"), load_next_pcd)
+# visualizer.register_key_callback(ord("P"), load_previous_pcd)
+# visualizer.register_key_callback(ord("Q"), quit_visualizer)
 
 # 첫 번째 파일 로드
 update_pcd(visualizer, file_index, view_control, current_view_params)
 current_view_params = view_control.convert_to_pinhole_camera_parameters()
 
 # auto_advance_pcd()
-visualizer.run()
-visualizer.destroy_window()
+create_video_from_pcd(folder_path)
+# visualizer.run()
+# visualizer.destroy_window()

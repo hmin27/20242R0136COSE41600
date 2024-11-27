@@ -29,8 +29,8 @@ if __name__ == "__main__":
     parser.add_argument('file_name', type=str, help='The name of scenario')
     args = parser.parse_args()
 
-    image_folder = f"image/{args.file_name}"  # Path to the folder containing images
-    output_video_path = f"result/{args.file_name}.mp4"  # Path where the output video will be saved
-    frame_rate = 10  # Frame rate of the output video
+    image_folder = f"image/{args.file_name}"
+    output_video_path = f"result/{args.file_name}.mp4"
+    frame_rate = 10 
 
     images_to_video(image_folder, output_video_path, frame_rate)

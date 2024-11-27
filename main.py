@@ -3,10 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import copy
 import os
-import argparse
 import cv2
 import time
-from save_as_video import create_video_from_pcd
+import argparse
 from kalman_filter import initialize_kalman_filter, kalman_filter_tracking
 
 class PCDVisualizer:
@@ -80,9 +79,10 @@ class PCDVisualizer:
                 cluster_indices = np.where(labels == track_id)[0]
                 if len(cluster_indices) > 0:
                     cluster_pcd = current_pcd.select_by_index(cluster_indices)
-                    bbox = cluster_pcd.get_axis_aligned_bounding_box()
-                    bbox.color = (0, 1, 0)
-                    vis.add_geometry(bbox)
+                    if self.is_valid_person(cluster_pcd):                    
+                        bbox = cluster_pcd.get_axis_aligned_bounding_box()
+                        bbox.color = (0, 1, 0)
+                        vis.add_geometry(bbox)
         else:
             self.previous_tracks = {}
             for cluster_id, centroid in centroids_curr:
@@ -130,13 +130,26 @@ class PCDVisualizer:
         return moving_clusters
 
     def is_valid_person(self, cluster_pcd):
-        bbox = cluster_pcd.get_axis_aligned_bounding_box()
-        bbox_extent = bbox.get_extent()
-        height, width, depth = bbox_extent[2], bbox_extent[0], bbox_extent[1]
+        points = np.asarray(cluster_pcd.points)
+        num_points = len(points)
 
-        if 1.5 <= height <= 2.0 and 0.2 <= width <= 1.0 and 0.2 <= depth <= 1.0:
-            return True
-        return False
+        if not (5 <= num_points <= 30):
+            return False
+
+        z_values = points[:, 2]
+        z_min = z_values.min()
+        z_max = z_values.max()
+        height_diff = z_max - z_min
+
+        if not (0.5 <= height_diff <= 1.0):
+            return False
+
+        # # Check the distance from the origin
+        # distances = np.linalg.norm(points, axis=1)
+        # if distances.max() > 30.0:
+        #     return False
+
+        return True
 
     def run(self):
         self.visualizer.register_key_callback(ord("N"), self.load_next_pcd)
@@ -162,7 +175,7 @@ class PCDVisualizer:
     def quit_visualizer(self, vis):
         vis.close()
         return False
-    
+
     def save_image(self, folder_path):
 
         folder_name = os.path.basename(os.path.dirname(folder_path))
@@ -193,11 +206,12 @@ class PCDVisualizer:
             self.file_index += 1
 
         self.visualizer.destroy_window()
-
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process PCD files.")
     parser.add_argument('folder_path', type=str, help='Path to the folder containing PCD files')
     args = parser.parse_args()
 
     render = PCDVisualizer(args.folder_path)
-    render.save_image(args.folder_path)
+    # render.save_image(args.folder_path)
+    render.run()
